@@ -1,17 +1,52 @@
 #!/usr/bin/env python3
 """
-RunPod Serverless Handler — Video → 3D Gaussian Splatting
-Pipeline: ffmpeg frames → COLMAP SfM → GSplat training → .ply
-All dependencies are installed by dockerStartCmd before this runs.
+RunPod Serverless Handler — Video to 3D Gaussian Splatting
+Self-bootstrapping: installs deps on first run, then starts worker.
 """
 
-import os
-import sys
-import uuid
-import shutil
-import subprocess
-import tempfile
+import os, sys, uuid, shutil, subprocess, tempfile, time
 from pathlib import Path
+
+print("[bootstrap] Starting...", flush=True)
+
+def ensure(cmd, desc):
+    """Run a command, log, return True on success."""
+    print(f"[bootstrap] {desc}...", flush=True)
+    t0 = time.time()
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        print(f"[bootstrap]   OK ({time.time()-t0:.0f}s)", flush=True)
+        return True
+    except Exception as e:
+        print(f"[bootstrap]   WARN: {e}", flush=True)
+        return False
+
+# System deps
+for pkg in ["colmap", "ffmpeg"]:
+    if shutil.which(pkg) is None:
+        ensure(["apt-get", "update", "-qq"], f"apt update")
+        ensure(["apt-get", "install", "-y", "-qq", pkg], f"apt install {pkg}")
+
+# Python deps
+for dep in ["gsplat", "nerfview", "viser", "opencv-python-headless", "plyfile"]:
+    try:
+        __import__(dep.replace("-", "_"))
+    except ImportError:
+        ensure([sys.executable, "-m", "pip", "install", "-q", dep], f"pip install {dep}")
+
+# Clone gsplat repo for SimpleTrainer
+if not Path("/app/gsplat/examples/simple_trainer.py").exists():
+    ensure(["git", "clone", "--depth", "1", 
+            "https://github.com/nerfstudio-project/gsplat.git",
+            "/app/gsplat"], "git clone gsplat")
+
+# Download train script
+if not Path("/train_gsplat.py").exists():
+    ensure(["curl", "-sSL",
+            "https://raw.githubusercontent.com/matas-star/gsplat-worker/master/train_gsplat.py",
+            "-o", "/train_gsplat.py"], "download train_gsplat.py")
+
+print("[bootstrap] Done", flush=True)
 
 import requests
 import runpod
