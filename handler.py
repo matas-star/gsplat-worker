@@ -2,7 +2,7 @@
 """
 RunPod Serverless Handler — Video → 3D Gaussian Splatting
 Pipeline: ffmpeg frames → COLMAP SfM → GSplat training → .ply
-Self-bootstrapping: installs dependencies on first run.
+All dependencies are installed by dockerStartCmd before this runs.
 """
 
 import os
@@ -14,59 +14,6 @@ import tempfile
 from pathlib import Path
 
 import requests
-
-
-def bootstrap():
-    """Install all dependencies. Called once at worker startup."""
-    deps_ok = True
-    
-    # Check and install system deps
-    for pkg, check_cmd in [("colmap", ["which", "colmap"]), ("ffmpeg", ["which", "ffmpeg"])]:
-        try:
-            subprocess.run(check_cmd, check=True, capture_output=True)
-        except Exception:
-            print(f"[bootstrap] Installing {pkg}...")
-            try:
-                subprocess.run(["apt-get", "update", "-qq"], check=True, timeout=300)
-                subprocess.run(["apt-get", "install", "-y", "-qq", pkg, "wget", "curl"], check=True, timeout=300)
-            except Exception as e:
-                print(f"[bootstrap] WARNING: {pkg} install failed: {e}")
-                deps_ok = False
-
-    # Install Python deps
-    py_deps = ["gsplat", "nerfview", "viser", "opencv-python-headless", "plyfile"]
-    for dep in py_deps:
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "-q", dep], check=True, timeout=600)
-        except Exception as e:
-            print(f"[bootstrap] WARNING: {dep} install failed: {e}")
-            deps_ok = False
-
-    # Clone gsplat repo for SimpleTrainer
-    if not Path("/app/gsplat").exists():
-        try:
-            subprocess.run(["git", "clone", "--depth", "1", 
-                          "https://github.com/nerfstudio-project/gsplat.git",
-                          "/app/gsplat"], check=True, timeout=600)
-        except Exception as e:
-            print(f"[bootstrap] WARNING: gsplat clone failed: {e}")
-
-    # Download train script
-    for fname in ["train_gsplat.py"]:
-        if not Path(f"/{fname}").exists():
-            try:
-                subprocess.run(["curl", "-sSL", 
-                              f"https://raw.githubusercontent.com/matas-star/gsplat-worker/master/{fname}",
-                              "-o", f"/{fname}"], check=True, timeout=60)
-            except Exception:
-                pass
-
-    print(f"[bootstrap] Done (all_ok={deps_ok})")
-    return deps_ok
-
-
-# Run bootstrap at import time
-_bootstrap_ok = bootstrap()
 import runpod
 
 OUTPUT_BASE = Path("/output")
@@ -90,7 +37,6 @@ def upload_to_public(filepath: str) -> str | None:
     except Exception:
         pass
 
-    # Fallback: transfer.sh
     try:
         with open(filepath, 'rb') as f:
             r = requests.put(
@@ -130,19 +76,16 @@ def handler(event):
     colmap_dir = workdir / 'colmap'
     output_dir = OUTPUT_BASE / job_id
 
-    print(f"[{job_id}] Starting. Video: {video_url}")
-    print(f"[{job_id}] fps={fps}, iterations={max_iterations}")
+    print(f"[{job_id}] Starting. fps={fps}, iterations={max_iterations}")
 
     try:
         # 1. Download video
         print(f"[{job_id}] (1/4) Downloading video...")
         video_path = workdir / 'input.mp4'
         run(['wget', '-q', '-O', str(video_path), video_url], timeout=600)
-        size_mb = video_path.stat().st_size / 1024 / 1024
-        print(f"[{job_id}] Video: {size_mb:.1f} MB")
 
         # 2. Extract frames
-        print(f"[{job_id}] (2/4) Extracting frames ({fps} fps)...")
+        print(f"[{job_id}] (2/4) Extracting frames...")
         frames_dir.mkdir()
         run([
             'ffmpeg', '-i', str(video_path),
@@ -152,36 +95,30 @@ def handler(event):
         ], timeout=300)
 
         frame_count = len(list(frames_dir.glob('*.jpg')))
-        print(f"[{job_id}] {frame_count} frames")
-
         if frame_count < 5:
-            return {'error': f'Too few frames: {frame_count} (need at least 5)'}
+            return {'error': f'Too few frames: {frame_count}'}
 
         # 3. COLMAP SfM
-        print(f"[{job_id}] (3/4) COLMAP Structure-from-Motion...")
+        print(f"[{job_id}] (3/4) COLMAP...")
         colmap_dir.mkdir()
         database_path = colmap_dir / 'database.db'
         sparse_dir = colmap_dir / 'sparse'
         sparse_dir.mkdir()
 
-        print(f"[{job_id}]   Feature extraction...")
         run([
             'colmap', 'feature_extractor',
             '--database_path', str(database_path),
             '--image_path', str(frames_dir),
             '--ImageReader.camera_model', 'SIMPLE_RADIAL',
             '--SiftExtraction.use_gpu', '1',
-            '--SiftExtraction.max_image_size', '1920',
         ], timeout=600)
 
-        print(f"[{job_id}]   Feature matching...")
         run([
             'colmap', 'sequential_matcher',
             '--database_path', str(database_path),
             '--SiftMatching.use_gpu', '1',
         ], timeout=600)
 
-        print(f"[{job_id}]   Sparse reconstruction...")
         run([
             'colmap', 'mapper',
             '--database_path', str(database_path),
@@ -189,7 +126,6 @@ def handler(event):
             '--output_path', str(sparse_dir),
         ], timeout=1200)
 
-        # Export text format for gsplat
         text_dir = colmap_dir / 'text'
         text_dir.mkdir()
         run([
@@ -199,15 +135,12 @@ def handler(event):
             '--output_type', 'TXT',
         ], timeout=120)
 
-        print(f"[{job_id}]   COLMAP done")
-
         # 4. GSplat training
-        print(f"[{job_id}] (4/4) GSplat training ({max_iterations} iterations)...")
+        print(f"[{job_id}] (4/4) GSplat training...")
         output_dir.mkdir(parents=True)
 
-        train_script = Path('/app/train_gsplat.py')
         run([
-            sys.executable, str(train_script),
+            sys.executable, '/train_gsplat.py',
             '--source_path', str(frames_dir),
             '--model_path', str(output_dir),
             '--colmap_path', str(text_dir),
@@ -225,14 +158,11 @@ def handler(event):
         if not ply_file:
             return {'error': 'No .ply file created'}
 
-        print(f"[{job_id}] PLY: {ply_file} ({ply_file.stat().st_size / 1024 / 1024:.1f} MB)")
-        print(f"[{job_id}] Uploading to public hosting...")
         ply_url = upload_to_public(str(ply_file))
-
         if not ply_url:
             return {'error': 'Failed to upload result'}
 
-        print(f"[{job_id}] Done! PLY URL: {ply_url}")
+        print(f"[{job_id}] Done! {ply_url}")
 
         return {
             'status': 'completed',
@@ -242,7 +172,7 @@ def handler(event):
         }
 
     except subprocess.CalledProcessError as e:
-        print(f"[{job_id}] Subprocess error: {e}")
+        print(f"[{job_id}] Error: {e}")
         return {'error': f'Process failed: {e.returncode}'}
     except Exception as e:
         print(f"[{job_id}] Error: {e}")
@@ -254,7 +184,6 @@ def handler(event):
             pass
 
 
-# ── RunPod entrypoint ──
 if __name__ == '__main__':
     print("GSplat Worker ready")
     runpod.serverless.start({'handler': handler})
