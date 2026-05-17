@@ -2,6 +2,7 @@
 """
 RunPod Serverless Handler — Video → 3D Gaussian Splatting
 Pipeline: ffmpeg frames → COLMAP SfM → GSplat training → .ply
+Self-bootstrapping: installs dependencies on first run.
 """
 
 import os
@@ -13,6 +14,59 @@ import tempfile
 from pathlib import Path
 
 import requests
+
+
+def bootstrap():
+    """Install all dependencies. Called once at worker startup."""
+    deps_ok = True
+    
+    # Check and install system deps
+    for pkg, check_cmd in [("colmap", ["which", "colmap"]), ("ffmpeg", ["which", "ffmpeg"])]:
+        try:
+            subprocess.run(check_cmd, check=True, capture_output=True)
+        except Exception:
+            print(f"[bootstrap] Installing {pkg}...")
+            try:
+                subprocess.run(["apt-get", "update", "-qq"], check=True, timeout=300)
+                subprocess.run(["apt-get", "install", "-y", "-qq", pkg, "wget", "curl"], check=True, timeout=300)
+            except Exception as e:
+                print(f"[bootstrap] WARNING: {pkg} install failed: {e}")
+                deps_ok = False
+
+    # Install Python deps
+    py_deps = ["gsplat", "nerfview", "viser", "opencv-python-headless", "plyfile"]
+    for dep in py_deps:
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", dep], check=True, timeout=600)
+        except Exception as e:
+            print(f"[bootstrap] WARNING: {dep} install failed: {e}")
+            deps_ok = False
+
+    # Clone gsplat repo for SimpleTrainer
+    if not Path("/app/gsplat").exists():
+        try:
+            subprocess.run(["git", "clone", "--depth", "1", 
+                          "https://github.com/nerfstudio-project/gsplat.git",
+                          "/app/gsplat"], check=True, timeout=600)
+        except Exception as e:
+            print(f"[bootstrap] WARNING: gsplat clone failed: {e}")
+
+    # Download train script
+    for fname in ["train_gsplat.py"]:
+        if not Path(f"/{fname}").exists():
+            try:
+                subprocess.run(["curl", "-sSL", 
+                              f"https://raw.githubusercontent.com/matas-star/gsplat-worker/master/{fname}",
+                              "-o", f"/{fname}"], check=True, timeout=60)
+            except Exception:
+                pass
+
+    print(f"[bootstrap] Done (all_ok={deps_ok})")
+    return deps_ok
+
+
+# Run bootstrap at import time
+_bootstrap_ok = bootstrap()
 import runpod
 
 OUTPUT_BASE = Path("/output")
