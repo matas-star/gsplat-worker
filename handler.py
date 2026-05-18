@@ -126,6 +126,8 @@ def run(cmd, **kwargs):
     # COLMAP needs a display; use offscreen on headless GPUs
     env = kwargs.pop('env', None) or {}
     env.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    # Capture stderr for error diagnostics
+    kwargs.setdefault('capture_output', True)
     return subprocess.run(cmd, check=True, env={**os.environ, **env}, **kwargs)
 
 
@@ -249,7 +251,8 @@ def _handler_impl(event):
         }
 
     except subprocess.CalledProcessError as e:
-        return {'error': f'Process {e.returncode}: {e.cmd[:3]}'}
+        stderr_tail = (e.stderr or b'').decode(errors='replace')[-200:] if e.stderr else ''
+        return {'error': f'Process {e.returncode}: {e.cmd[:3]} stderr: {stderr_tail}'[:500]}
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
