@@ -96,6 +96,18 @@ def run(cmd, **kwargs):
 
 def handler(event):
     """RunPod handler — receives event, returns result."""
+    try:
+        return _handler_impl(event)
+    except SystemExit:
+        raise
+    except BaseException as e:
+        import traceback
+        print(f"[FATAL] Handler crashed: {e}", flush=True)
+        traceback.print_exc()
+        return {'error': f'Worker crash: {type(e).__name__}: {e}'[:500]}
+
+
+def _handler_impl(event):
     job_input = event.get('input', {})
     video_url = job_input.get('video_url', '')
     sampling_rate = int(job_input.get('sampling_rate', 24))
