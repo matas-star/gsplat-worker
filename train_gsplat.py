@@ -11,9 +11,10 @@ import os
 import sys
 from pathlib import Path
 
-# Pridedam gsplat/examples i path'a
+# Pridedam gsplat repo i path'a (klonuotas kodas, ne pip paketas)
 GS_DIR = Path('/app/gsplat')
-sys.path.insert(0, str(GS_DIR / 'examples'))
+sys.path.insert(0, str(GS_DIR))  # gsplat paketas
+sys.path.insert(0, str(GS_DIR / 'examples'))  # simple_trainer
 
 from simple_trainer import SimpleTrainer, DefaultConfig
 
