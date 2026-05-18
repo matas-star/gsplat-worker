@@ -220,7 +220,10 @@ def _handler_impl(event):
     except subprocess.CalledProcessError as e:
         return {'error': f'Process {e.returncode}: {e.cmd[:3]}'}
     except Exception as e:
-        return {'error': str(e)[:500]}
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[{job_id}] ERROR: {tb}", flush=True)
+        return {'error': f'{type(e).__name__}: {e} (see worker logs)'[:500]}
     finally:
         try:
             shutil.rmtree(workdir)
