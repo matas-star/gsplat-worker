@@ -45,18 +45,24 @@ def do_bootstrap():
                 ensure(["apt-get", "update", "-qq"], "apt update")
                 ensure(["apt-get", "install", "-y", "-qq", pkg], f"apt install {pkg}")
 
-        for dep in ["jaxtyping", "gsplat", "nerfview", "viser", "opencv-python-headless", "plyfile", "tyro"]:
+        for dep in ["jaxtyping", "nerfview", "viser", "opencv-python-headless", "plyfile", "tyro"]:
             try:
                 __import__(dep.replace("-", "_"))
             except ImportError:
-                # Install without touching torch/cuda
                 ensure([sys.executable, "-m", "pip", "install", "-q",
                         "--no-build-isolation", dep], f"pip install {dep}")
 
+        # gsplat must match the cloned version
+        try:
+            import gsplat
+        except ImportError:
+            ensure([sys.executable, "-m", "pip", "install", "-q",
+                    "gsplat==1.4.0"], "pip install gsplat==1.4.0")
+
         if not Path("/app/gsplat/examples/simple_trainer.py").exists():
-            ensure(["git", "clone", "--depth", "1",
+            ensure(["git", "clone", "--depth", "1", "--branch", "v1.4.0",
                     "https://github.com/nerfstudio-project/gsplat.git",
-                    "/app/gsplat"], "git clone gsplat")
+                    "/app/gsplat"], "git clone gsplat v1.4.0")
 
         if not Path("/train_gsplat.py").exists():
             ensure(["curl", "-sSL",
