@@ -45,7 +45,7 @@ def do_bootstrap():
                 ensure(["apt-get", "update", "-qq"], "apt update")
                 ensure(["apt-get", "install", "-y", "-qq", pkg], f"apt install {pkg}")
 
-        for dep in ["jaxtyping", "nerfview", "viser", "opencv-python-headless", "plyfile", "tyro"]:
+        for dep in ["jaxtyping", "nerfview", "viser", "opencv-python-headless", "plyfile", "tyro", "matplotlib"]:
             try:
                 __import__(dep.replace("-", "_"))
             except ImportError:
