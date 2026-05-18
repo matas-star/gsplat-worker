@@ -117,17 +117,19 @@ def handler(event):
 
 
 def _handler_impl(event):
-    # Bootstrap on first job
-    do_bootstrap()
-
     job_input = event.get('input', {})
     video_url = job_input.get('video_url', '')
+
+    # Health check — respond immediately, no bootstrap
+    if not video_url:
+        return {'status': 'ok'}
+
+    # Real job — bootstrap first
+    do_bootstrap()
+
     sampling_rate = int(job_input.get('sampling_rate', 24))
     max_iterations = int(job_input.get('max_iterations', 15000))
     fps = min(sampling_rate, 30)
-
-    if not video_url:
-        return {'error': 'No video_url provided'}
 
     job_id = str(uuid.uuid4())[:8]
     workdir = Path(tempfile.mkdtemp(prefix=f'gsplat_{job_id}_'))
