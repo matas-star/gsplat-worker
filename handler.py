@@ -79,6 +79,76 @@ OUTPUT_BASE = Path("/output")
 OUTPUT_BASE.mkdir(exist_ok=True)
 
 
+def ply_to_splat(ply_path: str, output_dir: str) -> str:
+    """Convert gsplat .ply output to .splat format for antimatter15 viewer."""
+    import numpy as np
+
+    print(f"[convert] PLY -> SPLAT: {ply_path}", flush=True)
+    with open(ply_path, "rb") as f:
+        header = b""
+        while True:
+            line = f.readline()
+            header += line
+            if line.startswith(b"end_header"):
+                break
+
+        vertex_count = 0
+        for line in header.split(b"\n"):
+            if line.startswith(b"element vertex"):
+                vertex_count = int(line.split()[-1])
+
+        data = f.read()
+
+    dtype = np.dtype([
+        ("x", "f4"), ("y", "f4"), ("z", "f4"),
+        ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),
+        ("f_dc_0", "f4"), ("f_dc_1", "f4"), ("f_dc_2", "f4"),
+        ("opacity", "f4"),
+        ("scale_0", "f4"), ("scale_1", "f4"), ("scale_2", "f4"),
+        ("rot_0", "f4"), ("rot_1", "f4"), ("rot_2", "f4"), ("rot_3", "f4"),
+    ])
+
+    vertices = np.frombuffer(data, dtype=dtype, count=vertex_count)
+
+    SH_C0 = 0.28209479177387814
+    r = np.clip(vertices["f_dc_0"] * SH_C0 + 0.5, 0, 1)
+    g = np.clip(vertices["f_dc_1"] * SH_C0 + 0.5, 0, 1)
+    b = np.clip(vertices["f_dc_2"] * SH_C0 + 0.5, 0, 1)
+
+    opacity = 1 / (1 + np.exp(-vertices["opacity"]))
+    scale = np.exp(vertices["scale_0"]) * 0.5
+
+    splat_dtype = np.dtype([
+        ("x", "f4"), ("y", "f4"), ("z", "f4"),
+        ("scale", "f4"),
+        ("rot_0", "f4"), ("rot_1", "f4"), ("rot_2", "f4"), ("rot_3", "f4"),
+        ("opacity", "f4"),
+        ("r", "u1"), ("g", "u1"), ("b", "u1"),
+    ])
+
+    splat_data = np.zeros(vertex_count, dtype=splat_dtype)
+    splat_data["x"] = vertices["x"]
+    splat_data["y"] = vertices["y"]
+    splat_data["z"] = vertices["z"]
+    splat_data["scale"] = scale
+    splat_data["rot_0"] = vertices["rot_0"]
+    splat_data["rot_1"] = vertices["rot_1"]
+    splat_data["rot_2"] = vertices["rot_2"]
+    splat_data["rot_3"] = vertices["rot_3"]
+    splat_data["opacity"] = opacity
+    splat_data["r"] = (r * 255).astype("u1")
+    splat_data["g"] = (g * 255).astype("u1")
+    splat_data["b"] = (b * 255).astype("u1")
+
+    splat_path = Path(output_dir) / "model.splat"
+    with open(splat_path, "wb") as f:
+        f.write(splat_data.tobytes())
+
+    size_mb = splat_path.stat().st_size / (1024 * 1024)
+    print(f"[convert]   OK: {size_mb:.1f} MB ({vertex_count} gaussians)", flush=True)
+    return str(splat_path)
+
+
 def upload_to_public(filepath: str) -> str | None:
     """Upload file to catbox.moe, fallback to tmpfiles, transfer.sh."""
     # 1. catbox.moe
@@ -180,12 +250,12 @@ def _handler_impl(event):
 
     try:
         # 1. Download video
-        print(f"[{job_id}] (1/4) Downloading...", flush=True)
+        print(f"[{job_id}] (1/5) Downloading...", flush=True)
         video_path = workdir / 'input.mp4'
         run(['wget', '-q', '-O', str(video_path), video_url], timeout=600)
 
         # 2. Extract frames
-        print(f"[{job_id}] (2/4) Extracting frames...", flush=True)
+        print(f"[{job_id}] (2/5) Extracting frames...", flush=True)
         frames_dir.mkdir()
         run([
             'ffmpeg', '-i', str(video_path),
@@ -200,7 +270,7 @@ def _handler_impl(event):
 
         # 3. COLMAP (xvfb-run provides virtual X server for headless GPU)
         # NOTE: apt colmap is CPU-only. Keep features+fps low.
-        print(f"[{job_id}] (3/4) COLMAP ({frame_count} frames)...", flush=True)
+        print(f"[{job_id}] (3/5) COLMAP ({frame_count} frames)...", flush=True)
         colmap_dir.mkdir()
         database_path = colmap_dir / 'database.db'
         sparse_dir = colmap_dir / 'sparse'
@@ -230,7 +300,7 @@ def _handler_impl(event):
              '--output_type', 'TXT'], timeout=300)
 
         # 4. GSplat training
-        print(f"[{job_id}] (4/4) GSplat training...", flush=True)
+        print(f"[{job_id}] (4/5) GSplat training...", flush=True)
         output_dir.mkdir(parents=True)
 
         run([sys.executable, '/train_gsplat.py',
@@ -240,18 +310,28 @@ def _handler_impl(event):
              '--iterations', str(max_iterations),
              '--save_ply', '1'], timeout=7200, cwd='/app')
 
-        # 5. Upload
+        # 5. Convert & Upload
         ply_files = [f for f in output_dir.rglob('*.ply') if f.stat().st_size > 1000]
         if not ply_files:
             return {'error': 'No .ply created'}
 
+        # Convert .ply to .splat (required by antimatter15 viewer)
+        print(f"[{job_id}] (5/5) Converting .ply -> .splat...", flush=True)
+        splat_path = ply_to_splat(str(ply_files[0]), str(output_dir))
+
+        # Upload both
         ply_url = upload_to_public(str(ply_files[0]))
         if not ply_url:
-            return {'error': 'Upload failed'}
+            return {'error': 'PLY upload failed'}
+
+        splat_url = upload_to_public(splat_path)
+        if not splat_url:
+            return {'error': 'SPLAT upload failed'}
 
         return {
             'status': 'completed',
             'ply_url': ply_url,
+            'splat_url': splat_url,
             'frame_count': frame_count,
             'iterations': max_iterations,
         }
