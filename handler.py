@@ -70,7 +70,24 @@ OUTPUT_BASE.mkdir(exist_ok=True)
 
 
 def upload_to_public(filepath: str) -> str | None:
-    """Upload file to tmpfiles.org, return public download URL."""
+    """Upload file to catbox.moe, fallback to tmpfiles, transfer.sh."""
+    # 1. catbox.moe
+    try:
+        with open(filepath, 'rb') as f:
+            r = requests.post(
+                'https://litterbox.catbox.moe/resources/internals/api.php',
+                files={'fileToUpload': (Path(filepath).name, f, 'application/octet-stream')},
+                data={'reqtype': 'fileupload', 'time': '72h'},
+                timeout=600,
+            )
+        if r.status_code == 200:
+            url = r.text.strip()
+            if url.startswith('https://'):
+                return url
+    except Exception:
+        pass
+
+    # 2. tmpfiles.org
     try:
         with open(filepath, 'rb') as f:
             r = requests.post(
@@ -127,7 +144,12 @@ def _handler_impl(event):
         return {'status': 'ok'}
 
     # Real job — bootstrap first
-    do_bootstrap()
+    try:
+        do_bootstrap()
+    except Exception as e:
+        import traceback
+        print(f"[bootstrap] FATAL: {traceback.format_exc()}", flush=True)
+        return {'error': f'Bootstrap failed: {e}'[:500]}
 
     sampling_rate = int(job_input.get('sampling_rate', 24))
     max_iterations = int(job_input.get('max_iterations', 15000))
