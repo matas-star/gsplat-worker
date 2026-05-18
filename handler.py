@@ -7,6 +7,10 @@ Registers worker FIRST, then bootstraps deps lazily on first job.
 import os, sys, uuid, shutil, subprocess, tempfile, time, threading
 from pathlib import Path
 
+# COLMAP needs a display; force headless mode globally
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+os.environ['DISPLAY'] = ':99'
+
 # Import runpod immediately (installed by dockerStartCmd)
 import runpod
 
