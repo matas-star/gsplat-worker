@@ -119,7 +119,10 @@ def upload_to_public(filepath: str) -> str | None:
 
 def run(cmd, **kwargs):
     print(f"[CMD] {' '.join(map(str, cmd))}", flush=True)
-    return subprocess.run(cmd, check=True, **kwargs)
+    # COLMAP needs a display; use offscreen on headless GPUs
+    env = kwargs.pop('env', None) or {}
+    env.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    return subprocess.run(cmd, check=True, env={**os.environ, **env}, **kwargs)
 
 
 def handler(event):
