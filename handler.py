@@ -201,23 +201,23 @@ def _handler_impl(event):
              '--database_path', str(database_path),
              '--image_path', str(frames_dir),
              '--ImageReader.camera_model', 'SIMPLE_RADIAL',
-             '--SiftExtraction.use_gpu', '1'], timeout=600)
+             '--SiftExtraction.use_gpu', '1'], timeout=900)
 
         run(['xvfb-run', '-a', 'colmap', 'sequential_matcher',
              '--database_path', str(database_path),
-             '--SiftMatching.use_gpu', '1'], timeout=600)
+             '--SiftMatching.use_gpu', '1'], timeout=1800)
 
         run(['xvfb-run', '-a', 'colmap', 'mapper',
              '--database_path', str(database_path),
              '--image_path', str(frames_dir),
-             '--output_path', str(sparse_dir)], timeout=1200)
+             '--output_path', str(sparse_dir)], timeout=2400)
 
         text_dir = colmap_dir / 'text'
         text_dir.mkdir()
         run(['xvfb-run', '-a', 'colmap', 'model_converter',
              '--input_path', str(sparse_dir / '0'),
              '--output_path', str(text_dir),
-             '--output_type', 'TXT'], timeout=120)
+             '--output_type', 'TXT'], timeout=300)
 
         # 4. GSplat training
         print(f"[{job_id}] (4/4) GSplat training...", flush=True)
