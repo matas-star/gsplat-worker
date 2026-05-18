@@ -1,55 +1,67 @@
 #!/usr/bin/env python3
 """
 RunPod Serverless Handler — Video to 3D Gaussian Splatting
-Self-bootstrapping: installs deps on first run, then starts worker.
+Registers worker FIRST, then bootstraps deps lazily on first job.
 """
 
-import os, sys, uuid, shutil, subprocess, tempfile, time
+import os, sys, uuid, shutil, subprocess, tempfile, time, threading
 from pathlib import Path
 
-print("[bootstrap] Starting...", flush=True)
+# Import runpod immediately (installed by dockerStartCmd)
+import runpod
+
+print("[init] Worker starting", flush=True)
+
+_bootstrap_done = False
+_bootstrap_lock = threading.Lock()
 
 def ensure(cmd, desc):
     """Run a command, log, return True on success."""
     print(f"[bootstrap] {desc}...", flush=True)
     t0 = time.time()
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
         print(f"[bootstrap]   OK ({time.time()-t0:.0f}s)", flush=True)
         return True
     except Exception as e:
         print(f"[bootstrap]   WARN: {e}", flush=True)
         return False
 
-# System deps
-for pkg in ["colmap", "ffmpeg"]:
-    if shutil.which(pkg) is None:
-        ensure(["apt-get", "update", "-qq"], f"apt update")
-        ensure(["apt-get", "install", "-y", "-qq", pkg], f"apt install {pkg}")
 
-# Python deps
-for dep in ["gsplat", "nerfview", "viser", "opencv-python-headless", "plyfile"]:
-    try:
-        __import__(dep.replace("-", "_"))
-    except ImportError:
-        ensure([sys.executable, "-m", "pip", "install", "-q", dep], f"pip install {dep}")
+def do_bootstrap():
+    """Install all deps. Called once before first job."""
+    global _bootstrap_done
+    with _bootstrap_lock:
+        if _bootstrap_done:
+            return
+        print("[bootstrap] Starting...", flush=True)
 
-# Clone gsplat repo for SimpleTrainer
-if not Path("/app/gsplat/examples/simple_trainer.py").exists():
-    ensure(["git", "clone", "--depth", "1", 
-            "https://github.com/nerfstudio-project/gsplat.git",
-            "/app/gsplat"], "git clone gsplat")
+        for pkg in ["colmap", "ffmpeg"]:
+            if shutil.which(pkg) is None:
+                ensure(["apt-get", "update", "-qq"], "apt update")
+                ensure(["apt-get", "install", "-y", "-qq", pkg], f"apt install {pkg}")
 
-# Download train script
-if not Path("/train_gsplat.py").exists():
-    ensure(["curl", "-sSL",
-            "https://raw.githubusercontent.com/matas-star/gsplat-worker/master/train_gsplat.py",
-            "-o", "/train_gsplat.py"], "download train_gsplat.py")
+        for dep in ["gsplat", "nerfview", "viser", "opencv-python-headless", "plyfile"]:
+            try:
+                __import__(dep.replace("-", "_"))
+            except ImportError:
+                ensure([sys.executable, "-m", "pip", "install", "-q", dep], f"pip install {dep}")
 
-print("[bootstrap] Done", flush=True)
+        if not Path("/app/gsplat/examples/simple_trainer.py").exists():
+            ensure(["git", "clone", "--depth", "1",
+                    "https://github.com/nerfstudio-project/gsplat.git",
+                    "/app/gsplat"], "git clone gsplat")
+
+        if not Path("/train_gsplat.py").exists():
+            ensure(["curl", "-sSL",
+                    "https://raw.githubusercontent.com/matas-star/gsplat-worker/master/train_gsplat.py",
+                    "-o", "/train_gsplat.py"], "download train_gsplat.py")
+
+        print("[bootstrap] Done", flush=True)
+        _bootstrap_done = True
+
 
 import requests
-import runpod
 
 OUTPUT_BASE = Path("/output")
 OUTPUT_BASE.mkdir(exist_ok=True)
@@ -71,7 +83,6 @@ def upload_to_public(filepath: str) -> str | None:
                 return url.replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
     except Exception:
         pass
-
     try:
         with open(filepath, 'rb') as f:
             r = requests.put(
@@ -84,30 +95,31 @@ def upload_to_public(filepath: str) -> str | None:
             return r.text.strip()
     except Exception:
         pass
-
     return None
 
 
 def run(cmd, **kwargs):
-    """Run a command with logging."""
-    print(f"[CMD] {' '.join(map(str, cmd))}")
+    print(f"[CMD] {' '.join(map(str, cmd))}", flush=True)
     return subprocess.run(cmd, check=True, **kwargs)
 
 
 def handler(event):
-    """RunPod handler — receives event, returns result."""
+    """RunPod handler — bootstrap on first call, then process."""
     try:
         return _handler_impl(event)
     except SystemExit:
         raise
     except BaseException as e:
         import traceback
-        print(f"[FATAL] Handler crashed: {e}", flush=True)
+        print(f"[FATAL] {type(e).__name__}: {e}", flush=True)
         traceback.print_exc()
-        return {'error': f'Worker crash: {type(e).__name__}: {e}'[:500]}
+        return {'error': f'{type(e).__name__}: {e}'[:500]}
 
 
 def _handler_impl(event):
+    # Bootstrap on first job
+    do_bootstrap()
+
     job_input = event.get('input', {})
     video_url = job_input.get('video_url', '')
     sampling_rate = int(job_input.get('sampling_rate', 24))
@@ -123,16 +135,16 @@ def _handler_impl(event):
     colmap_dir = workdir / 'colmap'
     output_dir = OUTPUT_BASE / job_id
 
-    print(f"[{job_id}] Starting. fps={fps}, iterations={max_iterations}")
+    print(f"[{job_id}] Starting. fps={fps}, iters={max_iterations}", flush=True)
 
     try:
         # 1. Download video
-        print(f"[{job_id}] (1/4) Downloading video...")
+        print(f"[{job_id}] (1/4) Downloading...", flush=True)
         video_path = workdir / 'input.mp4'
         run(['wget', '-q', '-O', str(video_path), video_url], timeout=600)
 
         # 2. Extract frames
-        print(f"[{job_id}] (2/4) Extracting frames...")
+        print(f"[{job_id}] (2/4) Extracting frames...", flush=True)
         frames_dir.mkdir()
         run([
             'ffmpeg', '-i', str(video_path),
@@ -145,71 +157,54 @@ def _handler_impl(event):
         if frame_count < 5:
             return {'error': f'Too few frames: {frame_count}'}
 
-        # 3. COLMAP SfM
-        print(f"[{job_id}] (3/4) COLMAP...")
+        # 3. COLMAP
+        print(f"[{job_id}] (3/4) COLMAP...", flush=True)
         colmap_dir.mkdir()
         database_path = colmap_dir / 'database.db'
         sparse_dir = colmap_dir / 'sparse'
         sparse_dir.mkdir()
 
-        run([
-            'colmap', 'feature_extractor',
-            '--database_path', str(database_path),
-            '--image_path', str(frames_dir),
-            '--ImageReader.camera_model', 'SIMPLE_RADIAL',
-            '--SiftExtraction.use_gpu', '1',
-        ], timeout=600)
+        run(['colmap', 'feature_extractor',
+             '--database_path', str(database_path),
+             '--image_path', str(frames_dir),
+             '--ImageReader.camera_model', 'SIMPLE_RADIAL',
+             '--SiftExtraction.use_gpu', '1'], timeout=600)
 
-        run([
-            'colmap', 'sequential_matcher',
-            '--database_path', str(database_path),
-            '--SiftMatching.use_gpu', '1',
-        ], timeout=600)
+        run(['colmap', 'sequential_matcher',
+             '--database_path', str(database_path),
+             '--SiftMatching.use_gpu', '1'], timeout=600)
 
-        run([
-            'colmap', 'mapper',
-            '--database_path', str(database_path),
-            '--image_path', str(frames_dir),
-            '--output_path', str(sparse_dir),
-        ], timeout=1200)
+        run(['colmap', 'mapper',
+             '--database_path', str(database_path),
+             '--image_path', str(frames_dir),
+             '--output_path', str(sparse_dir)], timeout=1200)
 
         text_dir = colmap_dir / 'text'
         text_dir.mkdir()
-        run([
-            'colmap', 'model_converter',
-            '--input_path', str(sparse_dir / '0'),
-            '--output_path', str(text_dir),
-            '--output_type', 'TXT',
-        ], timeout=120)
+        run(['colmap', 'model_converter',
+             '--input_path', str(sparse_dir / '0'),
+             '--output_path', str(text_dir),
+             '--output_type', 'TXT'], timeout=120)
 
         # 4. GSplat training
-        print(f"[{job_id}] (4/4) GSplat training...")
+        print(f"[{job_id}] (4/4) GSplat training...", flush=True)
         output_dir.mkdir(parents=True)
 
-        run([
-            sys.executable, '/train_gsplat.py',
-            '--source_path', str(frames_dir),
-            '--model_path', str(output_dir),
-            '--colmap_path', str(text_dir),
-            '--iterations', str(max_iterations),
-            '--save_ply', '1',
-        ], timeout=7200, cwd='/app')
+        run([sys.executable, '/train_gsplat.py',
+             '--source_path', str(frames_dir),
+             '--model_path', str(output_dir),
+             '--colmap_path', str(text_dir),
+             '--iterations', str(max_iterations),
+             '--save_ply', '1'], timeout=7200, cwd='/app')
 
-        # 5. Upload result
-        ply_file = None
-        for f in output_dir.rglob('*.ply'):
-            if f.stat().st_size > 1000:
-                ply_file = f
-                break
+        # 5. Upload
+        ply_files = [f for f in output_dir.rglob('*.ply') if f.stat().st_size > 1000]
+        if not ply_files:
+            return {'error': 'No .ply created'}
 
-        if not ply_file:
-            return {'error': 'No .ply file created'}
-
-        ply_url = upload_to_public(str(ply_file))
+        ply_url = upload_to_public(str(ply_files[0]))
         if not ply_url:
-            return {'error': 'Failed to upload result'}
-
-        print(f"[{job_id}] Done! {ply_url}")
+            return {'error': 'Upload failed'}
 
         return {
             'status': 'completed',
@@ -219,10 +214,8 @@ def _handler_impl(event):
         }
 
     except subprocess.CalledProcessError as e:
-        print(f"[{job_id}] Error: {e}")
-        return {'error': f'Process failed: {e.returncode}'}
+        return {'error': f'Process {e.returncode}: {e.cmd[:3]}'}
     except Exception as e:
-        print(f"[{job_id}] Error: {e}")
         return {'error': str(e)[:500]}
     finally:
         try:
@@ -232,5 +225,5 @@ def _handler_impl(event):
 
 
 if __name__ == '__main__':
-    print("GSplat Worker ready")
+    print("[init] Starting RunPod serverless...", flush=True)
     runpod.serverless.start({'handler': handler})
