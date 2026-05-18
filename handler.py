@@ -207,7 +207,6 @@ def _handler_impl(event):
 
         run(['xvfb-run', '-a', 'colmap', 'sequential_matcher',
              '--database_path', str(database_path),
-             '--SiftMatching.max_num_features', '1000',
              '--SiftMatching.use_gpu', '1'], timeout=3600)
 
         run(['xvfb-run', '-a', 'colmap', 'mapper',
