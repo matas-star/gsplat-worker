@@ -41,11 +41,13 @@ def do_bootstrap():
                 ensure(["apt-get", "update", "-qq"], "apt update")
                 ensure(["apt-get", "install", "-y", "-qq", pkg], f"apt install {pkg}")
 
-        for dep in ["gsplat", "nerfview", "viser", "opencv-python-headless", "plyfile"]:
+        for dep in ["jaxtyping", "gsplat", "nerfview", "viser", "opencv-python-headless", "plyfile"]:
             try:
                 __import__(dep.replace("-", "_"))
             except ImportError:
-                ensure([sys.executable, "-m", "pip", "install", "-q", dep], f"pip install {dep}")
+                # Install without touching torch/cuda
+                ensure([sys.executable, "-m", "pip", "install", "-q",
+                        "--no-build-isolation", dep], f"pip install {dep}")
 
         if not Path("/app/gsplat/examples/simple_trainer.py").exists():
             ensure(["git", "clone", "--depth", "1",
