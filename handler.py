@@ -191,7 +191,8 @@ def _handler_impl(event):
             return {'error': f'Too few frames: {frame_count}'}
 
         # 3. COLMAP (xvfb-run provides virtual X server for headless GPU)
-        print(f"[{job_id}] (3/4) COLMAP...", flush=True)
+        # NOTE: apt colmap is CPU-only. Keep features+fps low.
+        print(f"[{job_id}] (3/4) COLMAP ({frame_count} frames)...", flush=True)
         colmap_dir.mkdir()
         database_path = colmap_dir / 'database.db'
         sparse_dir = colmap_dir / 'sparse'
@@ -201,16 +202,18 @@ def _handler_impl(event):
              '--database_path', str(database_path),
              '--image_path', str(frames_dir),
              '--ImageReader.camera_model', 'SIMPLE_RADIAL',
-             '--SiftExtraction.use_gpu', '1'], timeout=900)
+             '--SiftExtraction.max_num_features', '1000',
+             '--SiftExtraction.use_gpu', '1'], timeout=600)
 
         run(['xvfb-run', '-a', 'colmap', 'sequential_matcher',
              '--database_path', str(database_path),
-             '--SiftMatching.use_gpu', '1'], timeout=1800)
+             '--SiftMatching.max_num_features', '1000',
+             '--SiftMatching.use_gpu', '1'], timeout=3600)
 
         run(['xvfb-run', '-a', 'colmap', 'mapper',
              '--database_path', str(database_path),
              '--image_path', str(frames_dir),
-             '--output_path', str(sparse_dir)], timeout=2400)
+             '--output_path', str(sparse_dir)], timeout=3600)
 
         text_dir = colmap_dir / 'text'
         text_dir.mkdir()
